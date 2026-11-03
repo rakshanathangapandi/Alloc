@@ -1,0 +1,324 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../backend/node_modules/.prisma/client"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum OrganizationRole {
+  ADMIN
+  MANAGER
+  MEMBER
+}
+
+enum TaskPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum TaskStatus {
+  BACKLOG
+  IN_PROGRESS
+  BLOCKED
+  COMPLETED
+  CANCELLED
+}
+
+enum LeaveStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  CANCELLED
+}
+
+enum AssignmentStatus {
+  ACTIVE
+  COMPLETED
+  CANCELLED
+}
+
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum AgentRunStatus {
+  QUEUED
+  RUNNING
+  AWAITING_APPROVAL
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+model Organization {
+  id          String                 @id @default(uuid()) @db.Uuid
+  name        String
+  createdAt   DateTime               @default(now()) @map("created_at")
+  updatedAt   DateTime               @updatedAt @map("updated_at")
+  memberships OrganizationMember[]
+  teams       Team[]
+  skills      Skill[]
+  tasks       Task[]
+  agentRuns   AgentRun[]
+
+  @@map("organizations")
+}
+
+model User {
+  id           String                 @id @default(uuid()) @db.Uuid
+  name         String
+  email        String                 @unique
+  passwordHash String                 @map("password_hash")
+  createdAt    DateTime               @default(now()) @map("created_at")
+  updatedAt    DateTime               @updatedAt @map("updated_at")
+  memberships  OrganizationMember[]
+
+  @@map("users")
+}
+
+model OrganizationMember {
+  organizationId  String              @db.Uuid @map("organization_id")
+  userId          String              @db.Uuid @map("user_id")
+  role            OrganizationRole    @default(MEMBER)
+  joinedAt        DateTime            @default(now()) @map("joined_at")
+  organization    Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user            User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  teamMemberships TeamMember[]
+  skills          UserSkill[]
+  schedules       WorkSchedule[]
+  leaveRequests   LeaveRequest[]
+  assignments     Assignment[]
+  recommendations AssignmentRecommendation[] @relation("Candidate")
+  approvals       ApprovalRequest[]
+  createdTasks    Task[]              @relation("TaskCreator")
+  activities      TaskActivity[]      @relation("ActivityActor")
+  notifications   Notification[]
+  managedTeams    Team[]              @relation("TeamManager")
+
+  @@id([organizationId, userId])
+  @@map("organization_members")
+}
+
+model Team {
+  id             String         @default(uuid()) @db.Uuid
+  organizationId String         @db.Uuid @map("organization_id")
+  name           String
+  managerUserId  String?        @db.Uuid @map("manager_user_id")
+  createdAt      DateTime       @default(now()) @map("created_at")
+  organization   Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  manager        OrganizationMember? @relation("TeamManager", fields: [organizationId, managerUserId], references: [organizationId, userId], onDelete: Restrict)
+  members        TeamMember[]
+  tasks          Task[]
+
+  @@id([organizationId, id])
+  @@unique([organizationId, name])
+  @@map("teams")
+}
+
+model TeamMember {
+  organizationId String             @db.Uuid @map("organization_id")
+  teamId         String             @db.Uuid @map("team_id")
+  userId         String             @db.Uuid @map("user_id")
+  joinedAt       DateTime           @default(now()) @map("joined_at")
+  team           Team               @relation(fields: [organizationId, teamId], references: [organizationId, id], onDelete: Cascade)
+  member         OrganizationMember @relation(fields: [organizationId, userId], references: [organizationId, userId], onDelete: Cascade)
+
+  @@id([organizationId, teamId, userId])
+  @@map("team_members")
+}
+
+model Skill {
+  id               String                  @default(uuid()) @db.Uuid
+  organizationId   String                  @db.Uuid @map("organization_id")
+  name             String
+  category         String?
+  organization     Organization            @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  members          UserSkill[]
+  taskRequirements TaskRequiredSkill[]
+
+  @@id([organizationId, id])
+  @@unique([organizationId, name])
+  @@map("skills")
+}
+
+model UserSkill {
+  organizationId String             @db.Uuid @map("organization_id")
+  userId         String             @db.Uuid @map("user_id")
+  skillId        String             @db.Uuid @map("skill_id")
+  proficiency    Int
+  verified       Boolean            @default(false)
+  member         OrganizationMember @relation(fields: [organizationId, userId], references: [organizationId, userId], onDelete: Cascade)
+  skill          Skill              @relation(fields: [organizationId, skillId], references: [organizationId, id], onDelete: Cascade)
+
+  @@id([organizationId, userId, skillId])
+  @@map("user_skills")
+}
+
+model Task {
+  id              String             @default(uuid()) @db.Uuid
+  organizationId  String             @db.Uuid @map("organization_id")
+  teamId          String             @db.Uuid @map("team_id")
+  createdByUserId String             @db.Uuid @map("created_by_user_id")
+  title           String
+  description     String             @db.Text
+  priority        TaskPriority       @default(MEDIUM)
+  status          TaskStatus         @default(BACKLOG)
+  deadline        DateTime?          @db.Timestamptz(3)
+  estimatedHours  Decimal?           @db.Decimal(8, 2) @map("estimated_hours")
+  createdAt       DateTime           @default(now()) @map("created_at")
+  updatedAt       DateTime           @updatedAt @map("updated_at")
+  organization    Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  team            Team               @relation(fields: [organizationId, teamId], references: [organizationId, id], onDelete: Restrict)
+  creator         OrganizationMember @relation("TaskCreator", fields: [organizationId, createdByUserId], references: [organizationId, userId], onDelete: Restrict)
+  requiredSkills  TaskRequiredSkill[]
+  assignments     Assignment[]
+  recommendations AssignmentRecommendation[]
+  agentRuns       AgentRun[]
+  activities      TaskActivity[]
+
+  @@id([organizationId, id])
+  @@index([organizationId, teamId, status])
+  @@map("tasks")
+}
+
+model TaskRequiredSkill {
+  organizationId String  @db.Uuid @map("organization_id")
+  taskId         String  @db.Uuid @map("task_id")
+  skillId        String  @db.Uuid @map("skill_id")
+  minimumLevel   Int     @map("minimum_level")
+  mandatory      Boolean @default(true)
+  task           Task    @relation(fields: [organizationId, taskId], references: [organizationId, id], onDelete: Cascade)
+  skill          Skill   @relation(fields: [organizationId, skillId], references: [organizationId, id], onDelete: Cascade)
+
+  @@id([organizationId, taskId, skillId])
+  @@map("task_required_skills")
+}
+
+model WorkSchedule {
+  id             String             @id @default(uuid()) @db.Uuid
+  organizationId String             @db.Uuid @map("organization_id")
+  userId         String             @db.Uuid @map("user_id")
+  weekday        Int
+  availableHours Decimal            @db.Decimal(5, 2) @map("available_hours")
+  timezone       String             @default("UTC")
+  member         OrganizationMember @relation(fields: [organizationId, userId], references: [organizationId, userId], onDelete: Cascade)
+
+  @@unique([organizationId, userId, weekday])
+  @@map("work_schedules")
+}
+
+model LeaveRequest {
+  id             String             @id @default(uuid()) @db.Uuid
+  organizationId String             @db.Uuid @map("organization_id")
+  userId         String             @db.Uuid @map("user_id")
+  startAt        DateTime           @db.Timestamptz(3) @map("start_at")
+  endAt          DateTime           @db.Timestamptz(3) @map("end_at")
+  status         LeaveStatus        @default(PENDING)
+  createdAt      DateTime           @default(now()) @map("created_at")
+  member         OrganizationMember @relation(fields: [organizationId, userId], references: [organizationId, userId], onDelete: Cascade)
+
+  @@index([organizationId, userId, status, startAt, endAt])
+  @@map("leave_requests")
+}
+
+model Assignment {
+  id             String             @id @default(uuid()) @db.Uuid
+  organizationId String             @db.Uuid @map("organization_id")
+  taskId         String             @db.Uuid @map("task_id")
+  userId         String             @db.Uuid @map("user_id")
+  allocatedHours Decimal            @db.Decimal(8, 2) @map("allocated_hours")
+  status         AssignmentStatus   @default(ACTIVE)
+  assignedAt     DateTime           @default(now()) @map("assigned_at")
+  task           Task               @relation(fields: [organizationId, taskId], references: [organizationId, id], onDelete: Cascade)
+  member         OrganizationMember @relation(fields: [organizationId, userId], references: [organizationId, userId], onDelete: Restrict)
+
+  @@index([organizationId, userId, status])
+  @@index([organizationId, taskId, status])
+  @@map("assignments")
+}
+
+model AssignmentRecommendation {
+  id             String             @id @default(uuid()) @db.Uuid
+  organizationId String             @db.Uuid @map("organization_id")
+  taskId         String             @db.Uuid @map("task_id")
+  candidateId    String             @db.Uuid @map("candidate_id")
+  score          Decimal            @db.Decimal(5, 2)
+  explanation    Json
+  modelVersion   String?            @map("model_version")
+  createdAt      DateTime           @default(now()) @map("created_at")
+  task           Task               @relation(fields: [organizationId, taskId], references: [organizationId, id], onDelete: Cascade)
+  candidate      OrganizationMember @relation("Candidate", fields: [organizationId, candidateId], references: [organizationId, userId], onDelete: Cascade)
+  approval       ApprovalRequest?
+
+  @@unique([organizationId, id])
+  @@unique([organizationId, taskId, candidateId, createdAt])
+  @@index([organizationId, taskId, score])
+  @@map("assignment_recommendations")
+}
+
+model ApprovalRequest {
+  id               String                    @id @default(uuid()) @db.Uuid
+  organizationId   String                    @db.Uuid @map("organization_id")
+  recommendationId String                    @db.Uuid @map("recommendation_id")
+  approverId       String                    @db.Uuid @map("approver_id")
+  status           ApprovalStatus            @default(PENDING)
+  decidedAt        DateTime?                 @db.Timestamptz(3) @map("decided_at")
+  recommendation   AssignmentRecommendation @relation(fields: [organizationId, recommendationId], references: [organizationId, id], onDelete: Cascade)
+  approver         OrganizationMember        @relation(fields: [organizationId, approverId], references: [organizationId, userId], onDelete: Restrict)
+
+  @@unique([organizationId, recommendationId])
+  @@index([organizationId, status])
+  @@map("approval_requests")
+}
+
+model AgentRun {
+  id             String         @id @default(uuid()) @db.Uuid
+  organizationId String         @db.Uuid @map("organization_id")
+  taskId         String         @db.Uuid @map("task_id")
+  workflowId     String         @unique @map("workflow_id")
+  status         AgentRunStatus @default(QUEUED)
+  error          String?        @db.Text
+  startedAt      DateTime       @default(now()) @map("started_at")
+  completedAt    DateTime?      @db.Timestamptz(3) @map("completed_at")
+  organization   Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  task           Task           @relation(fields: [organizationId, taskId], references: [organizationId, id], onDelete: Cascade)
+
+  @@index([organizationId, taskId, status])
+  @@map("agent_runs")
+}
+
+model TaskActivity {
+  id             String             @id @default(uuid()) @db.Uuid
+  organizationId String             @db.Uuid @map("organization_id")
+  taskId         String             @db.Uuid @map("task_id")
+  actorId        String             @db.Uuid @map("actor_id")
+  action         String
+  details        Json?
+  createdAt      DateTime           @default(now()) @map("created_at")
+  task           Task               @relation(fields: [organizationId, taskId], references: [organizationId, id], onDelete: Cascade)
+  actor          OrganizationMember @relation("ActivityActor", fields: [organizationId, actorId], references: [organizationId, userId], onDelete: Restrict)
+
+  @@index([organizationId, taskId, createdAt])
+  @@map("task_activity")
+}
+
+model Notification {
+  id             String             @id @default(uuid()) @db.Uuid
+  organizationId String             @db.Uuid @map("organization_id")
+  userId         String             @db.Uuid @map("user_id")
+  type           String
+  message        String             @db.Text
+  readAt         DateTime?          @db.Timestamptz(3) @map("read_at")
+  createdAt      DateTime           @default(now()) @map("created_at")
+  recipient      OrganizationMember @relation(fields: [organizationId, userId], references: [organizationId, userId], onDelete: Cascade)
+
+  @@index([organizationId, userId, readAt])
+  @@map("notifications")
+}

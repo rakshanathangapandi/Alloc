@@ -1,0 +1,26 @@
+{
+  "name": "smartassign-backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --test",
+    "db:generate": "prisma generate --schema ../prisma/schema.prisma",
+    "db:validate": "prisma validate --schema ../prisma/schema.prisma",
+    "db:push": "prisma db push --schema ../prisma/schema.prisma"
+  },
+  "dependencies": {
+    "@prisma/client": "6.19.0",
+    "bcryptjs": "3.0.2",
+    "dotenv": "16.4.7",
+    "express": "4.22.3",
+    "express-rate-limit": "7.5.1",
+    "jsonwebtoken": "9.0.2",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "prisma": "6.19.0"
+  }
+}

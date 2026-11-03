@@ -1,0 +1,495 @@
+openapi: 3.1.0
+info:
+  title: SmartAssign API
+  version: 0.1.0
+  description: Organization-scoped task allocation and approval API.
+servers:
+  - url: /api
+security:
+  - bearerAuth: []
+paths:
+  /auth/register:
+    post:
+      operationId: register
+      summary: Register an organization admin
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, email, password, organization_name]
+              properties:
+                name:
+                  type: string
+                  minLength: 1
+                  maxLength: 120
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+                  minLength: 12
+                  maxLength: 128
+                organization_name:
+                  type: string
+                  minLength: 1
+                  maxLength: 200
+      responses:
+        '201':
+          description: Account and organization created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthSession'
+        '409':
+          description: Email is already registered
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '429':
+          description: Too many authentication attempts
+  /auth/login:
+    post:
+      operationId: login
+      summary: Log in and select an organization
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email:
+                  type: string
+                  format: email
+                password:
+                  type: string
+                  minLength: 1
+                  maxLength: 128
+                organization_id:
+                  type: string
+                  format: uuid
+      responses:
+        '200':
+          description: Authenticated session
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthSession'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: Choose an organization from the returned memberships
+        '422':
+          $ref: '#/components/responses/ValidationError'
+        '429':
+          description: Too many authentication attempts
+  /tasks:
+    post:
+      operationId: createTask
+      summary: Create a task in the caller's organization
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTask'
+      responses:
+        '201':
+          description: Task created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    get:
+      operationId: listTasks
+      summary: List tasks visible to the caller
+      parameters:
+        - in: query
+          name: team_id
+          schema:
+            type: string
+            format: uuid
+        - in: query
+          name: status
+          schema:
+            $ref: '#/components/schemas/TaskStatus'
+      responses:
+        '200':
+          description: Tasks
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Task'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /teams:
+    get:
+      operationId: listTeams
+      summary: List teams visible to the caller
+      responses:
+        '200':
+          description: Teams
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Team'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      operationId: createTeam
+      summary: Create a team in the caller's organization
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                  minLength: 1
+                  maxLength: 120
+      responses:
+        '201':
+          description: Team created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Team'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/ValidationError'
+  /tasks/{task_id}/recommend:
+    post:
+      operationId: recommendAssignment
+      summary: Start an assignment recommendation workflow
+      parameters:
+        - $ref: '#/components/parameters/taskId'
+      responses:
+        '202':
+          description: Workflow accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [run_id, status]
+                properties:
+                  run_id:
+                    type: string
+                    format: uuid
+                  status:
+                    type: string
+                    enum: [queued]
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /agent-runs/{run_id}:
+    get:
+      operationId: getAgentRun
+      summary: Get workflow status and recommendations
+      parameters:
+        - name: run_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Workflow state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentRun'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /tasks/{task_id}/recommendations:
+    get:
+      operationId: listRecommendations
+      summary: List ranked recommendations for a task
+      parameters:
+        - $ref: '#/components/parameters/taskId'
+      responses:
+        '200':
+          description: Ranked candidates
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Recommendation'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /recommendations/{recommendation_id}/approve:
+    post:
+      operationId: approveRecommendation
+      summary: Approve a recommendation
+      description: The approver identity is taken from the authenticated session, never from the request body.
+      parameters:
+        - $ref: '#/components/parameters/recommendationId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                comment:
+                  type: string
+                  maxLength: 2000
+      responses:
+        '200':
+          description: Assignment committed
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [assignment_id, status]
+                properties:
+                  assignment_id:
+                    type: string
+                    format: uuid
+                  status:
+                    type: string
+                    const: assigned
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Recommendation is stale or capacity is no longer available
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /recommendations/{recommendation_id}/reject:
+    post:
+      operationId: rejectRecommendation
+      summary: Reject a recommendation
+      parameters:
+        - $ref: '#/components/parameters/recommendationId'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+                  maxLength: 2000
+      responses:
+        '204':
+          description: Recommendation rejected
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    taskId:
+      name: task_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    recommendationId:
+      name: recommendation_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+  responses:
+    Unauthorized:
+      description: Authentication required
+    Forbidden:
+      description: Caller lacks permission or organization membership
+    NotFound:
+      description: Resource not found in the caller's organization
+    ValidationError:
+      description: Request validation failed
+  schemas:
+    Team:
+      type: object
+      required: [id, name, member_count, task_count]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        member_count:
+          type: integer
+          minimum: 0
+        task_count:
+          type: integer
+          minimum: 0
+    AuthSession:
+      type: object
+      required: [access_token, token_type, expires_in, user, organization]
+      properties:
+        access_token:
+          type: string
+        token_type:
+          type: string
+          const: Bearer
+        expires_in:
+          type: integer
+          const: 3600
+        user:
+          type: object
+          required: [id, name, email]
+          properties:
+            id:
+              type: string
+              format: uuid
+            name:
+              type: string
+            email:
+              type: string
+              format: email
+        organization:
+          type: object
+          required: [id, name]
+          properties:
+            id:
+              type: string
+              format: uuid
+            name:
+              type: string
+    TaskStatus:
+      type: string
+      enum: [BACKLOG, IN_PROGRESS, BLOCKED, COMPLETED, CANCELLED]
+    Task:
+      type: object
+      required: [id, team_id, title, priority, status]
+      properties:
+        id:
+          type: string
+          format: uuid
+        team_id:
+          type: string
+          format: uuid
+        title:
+          type: string
+        description:
+          type: string
+        priority:
+          type: string
+          enum: [LOW, MEDIUM, HIGH, URGENT]
+        status:
+          $ref: '#/components/schemas/TaskStatus'
+        deadline:
+          type: [string, 'null']
+          format: date-time
+        estimated_hours:
+          type: [number, 'null']
+          minimum: 0
+    CreateTask:
+      type: object
+      required: [team_id, title, description]
+      properties:
+        team_id:
+          type: string
+          format: uuid
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        description:
+          type: string
+          maxLength: 20000
+        priority:
+          type: string
+          enum: [LOW, MEDIUM, HIGH, URGENT]
+          default: MEDIUM
+        deadline:
+          type: [string, 'null']
+          format: date-time
+        estimated_hours:
+          type: [number, 'null']
+          exclusiveMinimum: 0
+        required_skills:
+          type: array
+          items:
+            type: object
+            required: [skill_id, minimum_level]
+            properties:
+              skill_id:
+                type: string
+                format: uuid
+              minimum_level:
+                type: integer
+                minimum: 1
+                maximum: 5
+              mandatory:
+                type: boolean
+                default: true
+    Recommendation:
+      type: object
+      required: [id, candidate_id, score, eligible, reasons]
+      properties:
+        id:
+          type: string
+          format: uuid
+        candidate_id:
+          type: string
+          format: uuid
+        candidate_name:
+          type: string
+        score:
+          type: number
+          minimum: 0
+          maximum: 100
+        eligible:
+          type: boolean
+        reasons:
+          type: array
+          items:
+            type: string
+    AgentRun:
+      type: object
+      required: [id, status, recommendations]
+      properties:
+        id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [queued, running, awaiting_approval, completed, failed, no_match]
+        recommendations:
+          type: array
+          items:
+            $ref: '#/components/schemas/Recommendation'
+        error:
+          type: [string, 'null']
