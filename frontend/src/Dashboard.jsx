@@ -462,7 +462,7 @@ function AuthScreen({ onAuthenticated }) {
       const result = await api('/auth/login', {
         method: 'POST',
         body: JSON.stringify({
-          email: 'aarav.web@demo.smartassign.local',
+          email: 'manager@demo.smartassign.local',
           password: 'DemoPassword!2026',
         }),
       })

@@ -84,6 +84,24 @@ async function main() {
   if (!organization) organization = await prisma.organization.create({ data: { name: DEMO_ORGANIZATION } });
   const passwordHash = demoPasswordHash();
 
+  const demoManagerEmail = "manager@demo.smartassign.local";
+  let demoManager = await prisma.user.findUnique({ where: { email: demoManagerEmail } });
+  if (!demoManager) {
+    demoManager = await prisma.user.create({
+      data: { name: "Demo Manager", email: demoManagerEmail, passwordHash },
+    });
+  } else {
+    await prisma.user.update({
+      where: { id: demoManager.id },
+      data: { name: "Demo Manager", passwordHash },
+    });
+  }
+  await prisma.organizationMember.upsert({
+    where: { organizationId_userId: { organizationId: organization.id, userId: demoManager.id } },
+    create: { organizationId: organization.id, userId: demoManager.id, role: "ADMIN" },
+    update: { role: "ADMIN" },
+  });
+
   const teamIds = {};
   const memberIds = {};
 
