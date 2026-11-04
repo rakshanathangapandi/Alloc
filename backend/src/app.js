@@ -22,7 +22,7 @@ app.use("/api", requireAuth);
 app.use("/api/tasks", tasksRouter);
 app.use("/api/teams", teamsRouter);
 app.use("/api/skills", skillsRouter);
-app.use("/api/teams", membersRouter); // /api/teams/:team_id/members
+app.use("/api/teams/:team_id/members", membersRouter); // team member routes
 app.use("/api", recommendationsRouter); // task recommend, agent-runs, approve/reject
 
 app.use((_req, _res, next) => {

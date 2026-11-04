@@ -21,44 +21,42 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
+from langgraph.types import Command
 from pydantic import BaseModel, Field
 
 from .config import settings
-from .db import close_pool, get_pool
 from .services import PrismaAssignmentServices
 
 
 # ── Lifespan: pool + checkpointer ─────────────────────────────────────────────
 
 _checkpointer = None
-_services: PrismaAssignmentServices | None = None
+_checkpointer_context = None
+_services: Optional[PrismaAssignmentServices] = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _checkpointer, _services
+    global _checkpointer, _checkpointer_context, _services
 
-    # Warm up the asyncpg pool
-    await get_pool()
+    from langgraph.checkpoint.postgres import PostgresSaver
 
-    # Build Postgres checkpointer (langgraph-checkpoint-postgres)
-    from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-
-    # Convert asyncpg DSN → psycopg DSN (psycopg uses the same format)
     dsn = settings.database_url.replace("postgres://", "postgresql://", 1)
-    _checkpointer = AsyncPostgresSaver.from_conn_string(dsn)
-    await _checkpointer.setup()
+    _checkpointer_context = PostgresSaver.from_conn_string(dsn)
+    _checkpointer = _checkpointer_context.__enter__()
+    _checkpointer.setup()
 
     _services = PrismaAssignmentServices()
 
     yield
 
-    await close_pool()
+    _checkpointer_context.__exit__(None, None, None)
+    _workflow_executor.shutdown(wait=True)
 
 
 app = FastAPI(title="SmartAssign Agent Service", lifespan=lifespan)
@@ -69,6 +67,7 @@ app = FastAPI(title="SmartAssign Agent Service", lifespan=lifespan)
 
 _run_tasks: dict[str, asyncio.Task] = {}
 _run_state: dict[str, dict] = {}   # last known state snapshot keyed by thread_id
+_workflow_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="smartassign-workflow")
 
 
 # ── Schemas ───────────────────────────────────────────────────────────────────
@@ -80,10 +79,10 @@ class StartRunRequest(BaseModel):
 
 class ResumeRequest(BaseModel):
     status: str = Field(..., pattern="^(approved|rejected)$")
-    candidate_id: str | None = None
-    approver_user_id: str | None = None
-    comment: str | None = None
-    reason: str | None = None
+    candidate_id: Optional[str] = None
+    approver_user_id: Optional[str] = None
+    comment: Optional[str] = None
+    reason: Optional[str] = None
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -108,15 +107,15 @@ def _recommendations_from_state(state: dict) -> list[dict]:
     ]
 
 
-def _status_from_state(state: dict, task_done: bool, task_error: BaseException | None) -> str:
+def _status_from_state(state: dict, task_done: bool, task_error: Optional[BaseException]) -> str:
+    # An interrupt is a paused workflow, never a terminal completed workflow.
+    ranked = state.get("ranked_candidates")
+    approval = state.get("approval_status")
+    if state.get("_interrupted") and ranked and approval is None and not task_error:
+        return "awaiting_approval"
     if task_error:
         return "failed"
     if not task_done:
-        # Check if graph is sitting at the interrupt node
-        ranked = state.get("ranked_candidates")
-        approval = state.get("approval_status")
-        if ranked and approval is None:
-            return "awaiting_approval"
         return "running"
     if state.get("errors"):
         return "failed"
@@ -138,18 +137,24 @@ async def _run_workflow(thread_id: str, organization_id: str, task_id: str) -> N
 
     try:
         _run_state[thread_id] = {"_running": True}
-        async for chunk in graph.astream(initial_state, config=config):
-            # Merge the latest node output into our cached state
-            for node_output in chunk.values():
-                _run_state[thread_id].update(node_output)
+        loop = asyncio.get_running_loop()
 
-            # If the graph interrupted for approval, stop streaming and wait
-            if _run_state[thread_id].get("ranked_candidates") and \
-               _run_state[thread_id].get("approval_status") is None:
-                break
+        def execute_workflow():
+            result = graph.invoke(initial_state, config)
+            snapshot = graph.get_state(config)
+            return result, snapshot
+
+        result, snapshot = await loop.run_in_executor(_workflow_executor, execute_workflow)
+        if isinstance(result, dict):
+            _run_state[thread_id].update(result)
+
+        interrupted = bool(getattr(snapshot, "next", ()) and getattr(snapshot, "tasks", ()) and any(getattr(task, "interrupts", ()) for task in snapshot.tasks))
+        awaiting = bool(interrupted and _run_state[thread_id].get("ranked_candidates") and _run_state[thread_id].get("approval_status") is None)
 
         _run_state[thread_id]["_running"] = False
-        _run_state[thread_id]["_done"] = True
+        _run_state[thread_id]["_done"] = not awaiting
+        if awaiting:
+            _run_state[thread_id]["_interrupted"] = True
     except Exception as exc:
         _run_state[thread_id]["_running"] = False
         _run_state[thread_id]["_done"] = True
@@ -220,17 +225,28 @@ async def resume_run(thread_id: str, body: ResumeRequest) -> dict:
 
     async def _continue():
         try:
-            async for chunk in graph.astream(
-                {"type": "resume", "value": decision}, config=config
-            ):
-                for node_output in chunk.values():
-                    _run_state[thread_id].update(node_output)
+            loop = asyncio.get_running_loop()
+
+            def resume_workflow():
+                result = graph.invoke(Command(resume=decision), config)
+                snapshot = graph.get_state(config)
+                return result, snapshot
+
+            result, snapshot = await loop.run_in_executor(_workflow_executor, resume_workflow)
+            if isinstance(result, dict):
+                _run_state[thread_id].update(result)
+            interrupted = bool(getattr(snapshot, "next", ()) and getattr(snapshot, "tasks", ()) and any(getattr(task, "interrupts", ()) for task in snapshot.tasks))
+            if interrupted:
+                _run_state[thread_id]["_interrupted"] = True
+            else:
+                _run_state[thread_id].pop("_interrupted", None)
             _run_state[thread_id]["_done"] = True
             _run_state[thread_id]["_running"] = False
         except Exception as exc:
             _run_state[thread_id]["_done"] = True
             _run_state[thread_id]["_running"] = False
             _run_state[thread_id]["_error"] = str(exc)
+            _run_state[thread_id].setdefault("errors", []).append(str(exc))
 
     resume_task = asyncio.create_task(_continue())
     _run_tasks[thread_id] = resume_task

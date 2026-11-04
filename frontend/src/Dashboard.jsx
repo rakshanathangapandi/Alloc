@@ -20,7 +20,7 @@ async function api(path, { token, ...options } = {}) {
     ...options,
     headers: {
       ...(options.body ? { 'Content-Type': 'application/json' } : {}),
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(token ? { Authorization: 'Bearer ' + token } : {}),
       ...options.headers,
     },
   })
@@ -44,13 +44,14 @@ function dateLabel(value) {
 }
 
 // ── active statuses for polling ──────────────────────────────────────────────
-const ACTIVE_RUN_STATUSES = new Set(['queued', 'running'])
+const ACTIVE_RUN_STATUSES = new Set(['queued', 'running', 'awaiting_approval'])
 
 export default function Dashboard() {
   const [session, setSession] = useState(readSession)
   const [view, setView] = useState('overview')
   const [tasks, setTasks] = useState([])
   const [teams, setTeams] = useState([])
+  const [skills, setSkills] = useState([])
   const [busy, setBusy] = useState(false)
   const [loadError, setLoadError] = useState('')
   const [modal, setModal] = useState(null)
@@ -69,12 +70,27 @@ export default function Dashboard() {
     setBusy(true)
     setLoadError('')
     try {
-      const [nextTasks, nextTeams] = await Promise.all([
+      const [nextTasks, nextTeams, nextSkills, nextRuns] = await Promise.all([
         api('/tasks', { token: currentSession.access_token }),
         api('/teams', { token: currentSession.access_token }),
+        api('/skills', { token: currentSession.access_token }),
+        api('/agent-runs', { token: currentSession.access_token }),
       ])
       setTasks(nextTasks)
       setTeams(nextTeams)
+      setSkills(nextSkills)
+      const restoredRuns = {}
+      nextRuns.forEach((run) => {
+        restoredRuns[run.task_id] = run
+      })
+      setAgentRuns(restoredRuns)
+      nextRuns.forEach((run) => {
+        if (['queued', 'running', 'awaiting_approval'].includes(run.status)) {
+          clearInterval(pollTimers.current[run.task_id])
+          pollTimers.current[run.task_id] = setInterval(() => pollRun(run.task_id, run.id), POLL_INTERVAL_MS)
+          pollRun(run.task_id, run.id)
+        }
+      })
     } catch (error) {
       if (error.status === 401 || error.status === 403) {
         localStorage.removeItem(SESSION_KEY)
@@ -139,8 +155,8 @@ export default function Dashboard() {
       const run = await api(`/agent-runs/${runId}`, { token: session.access_token })
       setAgentRuns((prev) => ({ ...prev, [taskId]: { run_id: runId, ...run } }))
 
-      // Stop polling once the run reaches a terminal state
-      if (!ACTIVE_RUN_STATUSES.has(run.status)) {
+      // Awaiting approval is paused, not terminal; keep its recommendations stable.
+      if (!['queued', 'running', 'awaiting_approval'].includes(run.status)) {
         clearInterval(pollTimers.current[taskId])
         delete pollTimers.current[taskId]
       }
@@ -152,16 +168,17 @@ export default function Dashboard() {
   async function startRecommendation(taskId) {
     setAgentRuns((prev) => ({ ...prev, [taskId]: { status: 'queued', recommendations: [] } }))
     try {
-      const { run_id: runId } = await api(`/tasks/${taskId}/recommend`, {
+      const { run_id: runId, status: initialStatus } = await api(`/tasks/${taskId}/recommend`, {
         token: session.access_token,
         method: 'POST',
       })
-      setAgentRuns((prev) => ({ ...prev, [taskId]: { run_id: runId, status: 'queued', recommendations: [] } }))
+      setAgentRuns((prev) => ({ ...prev, [taskId]: { run_id: runId, status: initialStatus, recommendations: [] } }))
 
-      // Start polling
-      if (pollTimers.current[taskId]) clearInterval(pollTimers.current[taskId])
-      pollTimers.current[taskId] = setInterval(() => pollRun(taskId, runId), POLL_INTERVAL_MS)
-      pollRun(taskId, runId)
+      if (initialStatus !== 'failed') {
+        if (pollTimers.current[taskId]) clearInterval(pollTimers.current[taskId])
+        pollTimers.current[taskId] = setInterval(() => pollRun(taskId, runId), POLL_INTERVAL_MS)
+        pollRun(taskId, runId)
+      }
     } catch (error) {
       setAgentRuns((prev) => ({ ...prev, [taskId]: { status: 'failed', error: error.message, recommendations: [] } }))
       setNotice(`Could not start recommendation: ${error.message}`)
@@ -205,7 +222,7 @@ export default function Dashboard() {
       const recs = await api(`/tasks/${taskId}/recommendations`, { token: session.access_token })
       setAgentRuns((prev) => ({
         ...prev,
-        [taskId]: { ...prev[taskId], recommendations: recs },
+        [taskId]: { ...prev[taskId], status: 'completed', recommendations: recs },
       }))
     } catch (error) {
       setNotice(`Rejection failed: ${error.message}`)
@@ -365,7 +382,7 @@ export default function Dashboard() {
         </div>
       </main>
       {modal === 'team' && <TeamModal onClose={() => setModal(null)} onSubmit={createTeam} />}
-      {modal === 'task' && <TaskModal teams={teams} onClose={() => setModal(null)} onSubmit={createTask} />}
+      {modal === 'task' && <TaskModal teams={teams} skills={skills} onClose={() => setModal(null)} onSubmit={createTask} />}
     </div>
   )
 }
@@ -438,6 +455,25 @@ function AuthScreen({ onAuthenticated }) {
 
   function changeMode(nextMode) { setMode(nextMode); setError(''); setOrganizations([]) }
 
+  async function signInDemo() {
+    setBusy(true)
+    setError('')
+    try {
+      const result = await api('/auth/login', {
+        method: 'POST',
+        body: JSON.stringify({
+          email: 'aarav.web@demo.smartassign.local',
+          password: 'DemoPassword!2026',
+        }),
+      })
+      onAuthenticated(result)
+    } catch (requestError) {
+      setError(requestError.message === 'Failed to fetch'
+        ? 'The API is not reachable. Start the backend and retry.'
+        : requestError.message)
+    } finally { setBusy(false) }
+  }
+
   return (
     <main className="auth-layout">
       <section className="auth-story">
@@ -483,6 +519,9 @@ function AuthScreen({ onAuthenticated }) {
               {!busy && <ArrowRight size={16} />}
             </button>
           </form>
+          <button className="demo-access-button" type="button" onClick={signInDemo} disabled={busy}>
+            <Sparkles size={15} /> Open demo workspace
+          </button>
           <p className="auth-legal">Your team's information stays within its organization workspace.</p>
         </div>
         <div className="auth-bottom"><span>SMARTASSIGN</span><span>SECURE TEAM ACCESS</span></div>
@@ -947,6 +986,19 @@ function TeamsView({ teams, loading, onCreate }) {
                     <span><UsersRound size={14} />{team.member_count} members</span>
                     <span><ListChecks size={14} />{team.task_count} tasks</span>
                   </div>
+                  {team.members?.length > 0 && (
+                    <div className="team-member-list">
+                      {team.members.map((member) => (
+                        <div className="team-member-row" key={member.id}>
+                          <span className="member-avatar">{member.name.split(' ').map((part) => part[0]).slice(0, 2).join('')}</span>
+                          <div>
+                            <strong>{member.name}</strong>
+                            <small>{member.skills?.length ? member.skills.map((skill) => `${skill.name} ${skill.proficiency}/5`).join(' · ') : member.role}</small>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </article>
               ))}
             </div>
@@ -1001,7 +1053,7 @@ function TeamModal({ onClose, onSubmit }) {
   )
 }
 
-function TaskModal({ teams, onClose, onSubmit }) {
+function TaskModal({ teams, skills, onClose, onSubmit }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   async function submit(e) {
@@ -1016,6 +1068,11 @@ function TaskModal({ teams, onClose, onSubmit }) {
       priority: values.get('priority'),
       deadline: deadline ? new Date(`${deadline}T23:59:00`).toISOString() : null,
       estimated_hours: hours ? Number(hours) : null,
+      required_skills: [...new FormData(e.currentTarget).getAll('required_skill')].map((skill_id) => ({
+        skill_id,
+        minimum_level: 1,
+        mandatory: true,
+      })),
     }
     try { await onSubmit(payload) } catch (err) { setError(err.message) } finally { setBusy(false) }
   }
@@ -1037,6 +1094,18 @@ function TaskModal({ teams, onClose, onSubmit }) {
           </Field>
           <Field label="Due date"><input name="deadline" type="date" min={new Date().toISOString().slice(0, 10)} /></Field>
           <Field label="Estimate (hours)"><input name="estimated_hours" type="number" min="0.25" step="0.25" placeholder="e.g. 6" /></Field>
+          {skills.length > 0 && (
+            <Field label="Required skills">
+              <div className="skill-checkboxes">
+                {skills.map((skill) => (
+                  <label key={skill.id} className="skill-checkbox">
+                    <input type="checkbox" name="required_skill" value={skill.id} />
+                    <span>{skill.name}</span>
+                  </label>
+                ))}
+              </div>
+            </Field>
+          )}
           <Field label="Description"><textarea name="description" placeholder="What needs to be done?" maxLength="20000" rows="3" required /></Field>
         </div>
         {error && <FormError>{error}</FormError>}

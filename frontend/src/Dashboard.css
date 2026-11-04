@@ -147,6 +147,11 @@
 .team-card h2 { margin: 4px 0 15px; color: #33443b; font: 700 16px/1.25 'Manrope', sans-serif; }
 .team-meta { display: flex; gap: 15px; padding-top: 12px; border-top: 1px solid #edf0ed; color: #859189; font-size: 10px; }
 .team-meta span { display: inline-flex; align-items: center; gap: 5px; }
+.team-member-list { display: grid; gap: 8px; margin-top: 12px; }
+.team-member-row { display: grid; grid-template-columns: 30px 1fr; align-items: center; gap: 8px; }
+.member-avatar { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 50%; color: #4f745f; background: #edf4ef; font-size: 9px; font-weight: 800; }
+.team-member-row strong { display: block; color: #4a5a51; font-size: 10px; }
+.team-member-row small { display: block; margin-top: 2px; color: #929d96; font-size: 8px; line-height: 1.4; }
 .toast { position: fixed; top: 77px; right: 25px; z-index: 10; display: flex; align-items: center; gap: 8px; padding: 10px 12px; border: 1px solid #d5e8d9; border-radius: 6px; color: #367259; background: white; box-shadow: 0 6px 24px #263e3014; font-size: 11px; animation: toast-in .22s ease-out; }
 .toast button { display: grid; place-items: center; margin-left: 7px; padding: 2px; border: 0; color: #89958d; background: transparent; }
 .alert-banner { display: flex; align-items: center; gap: 9px; margin-bottom: 17px; padding: 11px 13px; border: 1px solid #f0d7c8; border-radius: 6px; color: #a1573f; background: #fff8f4; font-size: 11px; }
@@ -194,6 +199,8 @@
 .auth-form { display: grid; gap: 13px; }
 .auth-form .field input { min-height: 41px; }
 .auth-submit { width: 100%; min-height: 42px; justify-content: space-between; margin-top: 3px; padding: 0 14px; }
+.demo-access-button { width: 100%; min-height: 38px; display: inline-flex; align-items: center; justify-content: center; gap: 7px; margin-top: 8px; border: 1px solid #dbe5dc; border-radius: 6px; color: #567464; background: #f8faf8; font-size: 10px; font-weight: 700; cursor: pointer; }
+.demo-access-button:hover { border-color: #b9cdbf; background: #f2f7f3; }
 .auth-submit svg { margin-left: auto; }
 .auth-legal { margin: 16px 0 0; color: #a2aaa4; font-size: 10px; line-height: 1.55; }
 .auth-bottom { width: min(390px, 100%); margin-top: auto; padding-top: 25px; color: #aab3ad; font-size: 8px; }

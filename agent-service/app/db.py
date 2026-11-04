@@ -6,32 +6,39 @@ the SmartAssign schema via raw SQL.  All queries are organisation-scoped.
 """
 from __future__ import annotations
 
+import asyncio
 import asyncpg
+from typing import Optional
 
 from .config import settings
 
-_pool: asyncpg.Pool | None = None
+_pool: Optional[asyncpg.Pool] = None
+_pool_loop: Optional[asyncio.AbstractEventLoop] = None
 
 
 async def get_pool() -> asyncpg.Pool:
-    global _pool
-    if _pool is None:
-        # asyncpg expects postgresql:// not postgres://, normalise just in case
+    global _pool, _pool_loop
+    loop = asyncio.get_running_loop()
+    if _pool is None or _pool_loop is not loop:
+        # asyncpg pools are bound to the loop that created their connections.
+        # Recreate the pool when LangGraph moves between worker event loops.
         dsn = settings.database_url.replace("postgres://", "postgresql://", 1)
-        _pool = await asyncpg.create_pool(dsn, min_size=2, max_size=10)
+        _pool = await asyncpg.create_pool(dsn, min_size=1, max_size=10)
+        _pool_loop = loop
     return _pool
 
 
 async def close_pool() -> None:
-    global _pool
+    global _pool, _pool_loop
     if _pool:
         await _pool.close()
         _pool = None
+        _pool_loop = None
 
 
 # ── task ─────────────────────────────────────────────────────────────────────
 
-async def fetch_task(organization_id: str, task_id: str) -> dict | None:
+async def fetch_task(organization_id: str, task_id: str) -> Optional[dict]:
     pool = await get_pool()
     row = await pool.fetchrow(
         """
@@ -83,6 +90,9 @@ async def fetch_candidates(organization_id: str, task: dict) -> list[dict]:
     """
     pool = await get_pool()
     required_skills: list[dict] = task.get("required_skills", [])
+    team_id = task.get("team_id")
+    if not team_id:
+        return []
 
     if not required_skills:
         rows = await pool.fetch(
@@ -93,9 +103,14 @@ async def fetch_candidates(organization_id: str, task: dict) -> list[dict]:
                 om.role
             FROM organization_members om
             JOIN users u ON u.id = om.user_id
+            JOIN team_members tm
+              ON tm.organization_id = om.organization_id
+             AND tm.user_id = om.user_id
+             AND tm.team_id = $2
             WHERE om.organization_id = $1
             """,
             organization_id,
+            team_id,
         )
         return [_bare_candidate(r) for r in rows]
 
@@ -111,11 +126,16 @@ async def fetch_candidates(organization_id: str, task: dict) -> list[dict]:
         JOIN users u         ON u.id = om.user_id
         JOIN user_skills us  ON us.organization_id = om.organization_id
                              AND us.user_id = om.user_id
+        JOIN team_members tm
+          ON tm.organization_id = om.organization_id
+         AND tm.user_id = om.user_id
+         AND tm.team_id = $3
         WHERE om.organization_id = $1
           AND us.skill_id = ANY($2::uuid[])
         """,
         organization_id,
         skill_ids,
+        team_id,
     )
 
     # For each candidate, fetch their full skill profile

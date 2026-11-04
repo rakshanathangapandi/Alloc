@@ -27,6 +27,22 @@ router.get(
       },
       include: {
         _count: { select: { members: true, tasks: true } },
+        manager: { include: { user: { select: { id: true, name: true } } } },
+        members: {
+          include: {
+            member: {
+              include: {
+                user: { select: { id: true, name: true, email: true } },
+                skills: {
+                  include: { skill: { select: { id: true, name: true } } },
+                  orderBy: [{ proficiency: "desc" }, { skill: { name: "asc" } }],
+                  take: 4,
+                },
+              },
+            },
+          },
+          orderBy: { joinedAt: "asc" },
+        },
       },
       orderBy: { name: "asc" },
     });
@@ -37,6 +53,17 @@ router.get(
         name: team.name,
         member_count: team._count.members,
         task_count: team._count.tasks,
+        manager: team.manager ? { id: team.manager.userId, name: team.manager.user.name } : null,
+        members: team.members.map((membership) => ({
+          id: membership.member.userId,
+          name: membership.member.user.name,
+          email: membership.member.user.email,
+          role: membership.member.role,
+          skills: membership.member.skills.map((userSkill) => ({
+            name: userSkill.skill.name,
+            proficiency: userSkill.proficiency,
+          })),
+        })),
       })),
     );
   }),

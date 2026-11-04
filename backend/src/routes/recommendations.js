@@ -21,13 +21,22 @@ function mapRunStatus(status) {
   return status.toLowerCase();
 }
 
+function requireTaskManagerAccess(auth, task) {
+  if (auth.role === "MEMBER") {
+    throw new HttpError(403, "Only an admin or manager can manage recommendations");
+  }
+  if (auth.role === "MANAGER" && task.team?.managerUserId !== auth.userId) {
+    throw new HttpError(403, "Managers can only manage tasks for teams they manage");
+  }
+}
+
 function toRecommendationResponse(rec) {
   return {
     id: rec.id,
     candidate_id: rec.candidateId,
     candidate_name: rec.candidate?.user?.name ?? null,
     score: Number(rec.score),
-    eligible: true,
+    eligible: rec.explanation?.eligible !== false,
     reasons: Array.isArray(rec.explanation?.reasons) ? rec.explanation.reasons : [],
   };
 }
@@ -95,7 +104,7 @@ router.post(
           completedAt: new Date(),
         },
       });
-      return res.status(202).json({ run_id: run.id, status: "queued" });
+      return res.status(202).json({ run_id: run.id, status: "failed" });
     }
 
     const run = await prisma.agentRun.create({
@@ -139,7 +148,7 @@ router.get(
               data: {
                 status: newStatus,
                 error: body.error ?? null,
-                completedAt: ["COMPLETED", "FAILED", "CANCELLED"].includes(newStatus)
+                completedAt: ["COMPLETED", "FAILED", "CANCELLED", "NO_MATCH"].includes(newStatus)
                   ? new Date()
                   : null,
               },
@@ -147,7 +156,7 @@ router.get(
           }
           // If recommendations arrived, persist them
           if (body.recommendations?.length) {
-            await persistRecommendations(organizationId, run.taskId, body.recommendations);
+            await persistRecommendations(organizationId, run.taskId, runId, body.recommendations);
           }
         }
       } catch {
@@ -159,7 +168,7 @@ router.get(
     const freshRun = await prisma.agentRun.findUniqueOrThrow({ where: { id: runId } });
 
     const recommendations = await prisma.assignmentRecommendation.findMany({
-      where: { organizationId, taskId: freshRun.taskId },
+      where: { organizationId, taskId: freshRun.taskId, agentRunId: freshRun.id },
       include: {
         candidate: { include: { user: { select: { id: true, name: true } } } },
       },
@@ -172,6 +181,34 @@ router.get(
       recommendations: recommendations.map(toRecommendationResponse),
       error: freshRun.error ?? null,
     });
+  }),
+);
+
+// ── GET /api/agent-runs ──────────────────────────────────────────────────────
+// Restore recommendation workflow state after a page refresh.
+router.get(
+  "/agent-runs",
+  asyncRoute(async (req, res) => {
+    const { organizationId } = req.auth;
+    const runs = await prisma.agentRun.findMany({
+      where: { organizationId },
+      include: {
+        recommendations: {
+          include: { candidate: { include: { user: { select: { id: true, name: true } } } } },
+          orderBy: { score: "desc" },
+        },
+      },
+      orderBy: { startedAt: "desc" },
+      take: 100,
+    });
+
+    res.json(runs.map((run) => ({
+      id: run.id,
+      task_id: run.taskId,
+      status: mapRunStatus(run.status),
+      recommendations: run.recommendations.map(toRecommendationResponse),
+      error: run.error ?? null,
+    })));
   }),
 );
 
@@ -192,8 +229,17 @@ router.get(
     });
     if (!task) throw new HttpError(404, "Task not found");
 
-    const recommendations = await prisma.assignmentRecommendation.findMany({
+    const latestRun = await prisma.agentRun.findFirst({
       where: { organizationId, taskId },
+      orderBy: { startedAt: "desc" },
+      select: { id: true },
+    });
+    const recommendations = await prisma.assignmentRecommendation.findMany({
+      where: {
+        organizationId,
+        taskId,
+        ...(latestRun ? { agentRunId: latestRun.id } : {}),
+      },
       include: {
         candidate: { include: { user: { select: { id: true, name: true } } } },
       },
@@ -228,12 +274,14 @@ router.post(
     const rec = await prisma.assignmentRecommendation.findFirst({
       where: { organizationId, id: recId },
       include: {
-        task: true,
+        task: { include: { team: true } },
         approval: true,
         candidate: true,
+        agentRun: true,
       },
     });
     if (!rec) throw new HttpError(404, "Recommendation not found");
+    requireTaskManagerAccess(req.auth, rec.task)
 
     // Idempotency — already approved
     if (rec.approval?.status === "APPROVED") {
@@ -241,6 +289,12 @@ router.post(
         where: { organizationId, taskId: rec.taskId, userId: rec.candidateId, status: "ACTIVE" },
       });
       if (assignment) {
+        await resumeAgentRun(rec.agentRunId, rec.agentRun?.workflowId, {
+          status: "approved",
+          candidate_id: rec.candidateId,
+          approver_user_id: userId,
+          comment: parsed.data.comment ?? null,
+        });
         return res.json({ assignment_id: assignment.id, status: "assigned" });
       }
     }
@@ -277,14 +331,22 @@ router.post(
 
     // Commit atomically: assignment + approval + task status + audit
     const result = await prisma.$transaction(async (tx) => {
-      const assignment = await tx.assignment.create({
-        data: {
-          organizationId,
-          taskId: rec.taskId,
-          userId: rec.candidateId,
-          allocatedHours: rec.task.estimatedHours ?? 0,
-          status: "ACTIVE",
-        },
+      const existingAssignment = await tx.assignment.findFirst({
+      where: {
+        organizationId,
+        taskId: rec.taskId,
+        userId: rec.candidateId,
+        status: "ACTIVE",
+      },
+      });
+      const assignment = existingAssignment ?? await tx.assignment.create({
+      data: {
+        organizationId,
+        taskId: rec.taskId,
+        userId: rec.candidateId,
+        allocatedHours: rec.task.estimatedHours ?? 0,
+        status: "ACTIVE",
+      },
       });
 
       // Upsert the approval record
@@ -324,33 +386,14 @@ router.post(
         },
       });
 
-      // Resume the agent graph with the approval decision
-      try {
-        const agentRun = await tx.agentRun.findFirst({
-          where: { organizationId, taskId: rec.taskId, status: "AWAITING_APPROVAL" },
-        });
-        if (agentRun) {
-          await fetch(`${agentServiceUrl()}/runs/${agentRun.workflowId}/resume`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              status: "approved",
-              candidate_id: rec.candidateId,
-              approver_user_id: userId,
-              comment: parsed.data.comment ?? null,
-            }),
-            signal: AbortSignal.timeout(5_000),
-          }).catch(() => {});
-          await tx.agentRun.update({
-            where: { id: agentRun.id },
-            data: { status: "COMPLETED", completedAt: new Date() },
-          });
-        }
-      } catch {
-        // Non-fatal if agent service is unreachable
-      }
-
       return assignment;
+    });
+
+    await resumeAgentRun(rec.agentRunId, rec.agentRun?.workflowId, {
+      status: "approved",
+      candidate_id: rec.candidateId,
+      approver_user_id: userId,
+      comment: parsed.data.comment ?? null,
     });
 
     res.json({ assignment_id: result.id, status: "assigned" });
@@ -379,11 +422,15 @@ router.post(
 
     const rec = await prisma.assignmentRecommendation.findFirst({
       where: { organizationId, id: recId },
-      include: { approval: true },
+      include: { approval: true, agentRun: true, task: { include: { team: true } } },
     });
     if (!rec) throw new HttpError(404, "Recommendation not found");
+    requireTaskManagerAccess(req.auth, rec.task)
     if (rec.approval?.status === "APPROVED") {
       throw new HttpError(409, "This recommendation has already been approved");
+    }
+    if (rec.approval?.status === "REJECTED") {
+      return res.status(204).send();
     }
 
     await prisma.$transaction(async (tx) => {
@@ -413,29 +460,11 @@ router.post(
         },
       });
 
-      // Resume the agent graph with the rejection
-      try {
-        const agentRun = await tx.agentRun.findFirst({
-          where: { organizationId, taskId: rec.taskId, status: "AWAITING_APPROVAL" },
-        });
-        if (agentRun) {
-          await fetch(`${agentServiceUrl()}/runs/${agentRun.workflowId}/resume`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              status: "rejected",
-              reason: parsed.data.reason ?? null,
-            }),
-            signal: AbortSignal.timeout(5_000),
-          }).catch(() => {});
-          await tx.agentRun.update({
-            where: { id: agentRun.id },
-            data: { status: "COMPLETED", completedAt: new Date() },
-          });
-        }
-      } catch {
-        // Non-fatal
-      }
+    });
+
+    await resumeAgentRun(rec.agentRunId, rec.agentRun?.workflowId, {
+      status: "rejected",
+      reason: parsed.data.reason ?? null,
     });
 
     res.status(204).send();
@@ -443,6 +472,28 @@ router.post(
 );
 
 // ── helpers ──────────────────────────────────────────────────────────────────
+
+async function resumeAgentRun(agentRunId, workflowId, decision) {
+  if (!agentRunId || !workflowId) return;
+  try {
+    const response = await fetch(`${agentServiceUrl()}/runs/${workflowId}/resume`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(decision),
+      signal: AbortSignal.timeout(5_000),
+    });
+    if (response.ok) {
+      // The agent run will be observed as completed by polling; do not mark it
+      // completed until the resume result is reflected in agent state.
+      await prisma.agentRun.update({
+        where: { id: agentRunId },
+        data: { status: "RUNNING", completedAt: null },
+      });
+    }
+  } catch {
+    // The database transaction is authoritative; polling can retry observability.
+  }
+}
 
 function mapAgentStatus(status) {
   const map = {
@@ -452,7 +503,7 @@ function mapAgentStatus(status) {
     completed: "COMPLETED",
     failed: "FAILED",
     cancelled: "CANCELLED",
-    no_match: "COMPLETED",
+    no_match: "NO_MATCH",
   };
   return map[status] ?? "RUNNING";
 }
@@ -461,24 +512,37 @@ function mapAgentStatus(status) {
  * Persist ranked recommendations from the agent service into the DB,
  * skipping ones that already exist for this task/candidate pair.
  */
-async function persistRecommendations(organizationId, taskId, recommendations) {
+async function persistRecommendations(organizationId, taskId, agentRunId, recommendations) {
   for (const rec of recommendations) {
+    if (!rec.candidate_id) continue;
     const existing = await prisma.assignmentRecommendation.findFirst({
-      where: { organizationId, taskId, candidateId: rec.candidate_id },
-      orderBy: { createdAt: "desc" },
+      where: { organizationId, taskId, agentRunId, candidateId: rec.candidate_id },
     });
     if (!existing) {
-      await prisma.assignmentRecommendation
-        .create({
-          data: {
-            organizationId,
-            taskId,
-            candidateId: rec.candidate_id,
-            score: rec.score ?? 0,
-            explanation: { reasons: rec.reasons ?? [] },
+      await prisma.assignmentRecommendation.create({
+        data: {
+          organizationId,
+          taskId,
+          agentRunId,
+          candidateId: rec.candidate_id,
+          score: rec.score ?? 0,
+          explanation: {
+            reasons: rec.reasons ?? [],
+            eligible: rec.eligible !== false,
           },
-        })
-        .catch(() => {}); // ignore unique constraint races
+        },
+      }).catch(() => {});
+    } else {
+      await prisma.assignmentRecommendation.update({
+        where: { id: existing.id },
+        data: {
+          score: rec.score ?? 0,
+          explanation: {
+            reasons: rec.reasons ?? [],
+            eligible: rec.eligible !== false,
+          },
+        },
+      });
     }
   }
 }

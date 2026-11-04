@@ -55,6 +55,7 @@ enum AgentRunStatus {
   COMPLETED
   FAILED
   CANCELLED
+  NO_MATCH
 }
 
 model Organization {
@@ -239,6 +240,7 @@ model Assignment {
   task           Task               @relation(fields: [organizationId, taskId], references: [organizationId, id], onDelete: Cascade)
   member         OrganizationMember @relation(fields: [organizationId, userId], references: [organizationId, userId], onDelete: Restrict)
 
+  @@unique([organizationId, taskId, userId, status])
   @@index([organizationId, userId, status])
   @@index([organizationId, taskId, status])
   @@map("assignments")
@@ -248,12 +250,14 @@ model AssignmentRecommendation {
   id             String             @id @default(uuid()) @db.Uuid
   organizationId String             @db.Uuid @map("organization_id")
   taskId         String             @db.Uuid @map("task_id")
+  agentRunId     String?            @db.Uuid @map("agent_run_id")
   candidateId    String             @db.Uuid @map("candidate_id")
   score          Decimal            @db.Decimal(5, 2)
   explanation    Json
   modelVersion   String?            @map("model_version")
   createdAt      DateTime           @default(now()) @map("created_at")
   task           Task               @relation(fields: [organizationId, taskId], references: [organizationId, id], onDelete: Cascade)
+  agentRun       AgentRun?          @relation(fields: [agentRunId], references: [id], onDelete: SetNull)
   candidate      OrganizationMember @relation("Candidate", fields: [organizationId, candidateId], references: [organizationId, userId], onDelete: Cascade)
   approval       ApprovalRequest?
 
@@ -289,6 +293,7 @@ model AgentRun {
   completedAt    DateTime?      @db.Timestamptz(3) @map("completed_at")
   organization   Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   task           Task           @relation(fields: [organizationId, taskId], references: [organizationId, id], onDelete: Cascade)
+  recommendations AssignmentRecommendation[]
 
   @@index([organizationId, taskId, status])
   @@map("agent_runs")
